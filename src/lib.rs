@@ -165,17 +165,19 @@ struct DefaultClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, Fu
 #[cfg(feature = "hyper-rustls")]
 impl DefaultClient {
     fn try_new() -> Result<Self, Error> {
-        Ok(Self(
-            HyperClient::builder(TokioExecutor::new()).build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .try_with_platform_verifier()
-                    .map_err(|e| Error::Other(Box::new(e)))?
-                    .https_only()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            ),
-        ))
+        Ok(Self(HyperClient::builder(TokioExecutor::new()).build({
+            let builder = hyper_rustls::HttpsConnectorBuilder::new();
+
+            #[cfg(feature = "allow-insecure-tls")]
+            let builder = builder.with_tls_config(insecure::client_config());
+
+            #[cfg(not(feature = "allow-insecure-tls"))]
+            let builder = builder
+                .try_with_platform_verifier()
+                .map_err(|e| Error::Other(Box::new(e)))?;
+
+            builder.https_only().enable_http1().enable_http2().build()
+        })))
     }
 }
 
@@ -321,6 +323,90 @@ mod crypto {
 
 const JOSE_JSON: &str = "application/jose+json";
 const REPLAY_NONCE: &str = "Replay-Nonce";
+
+#[cfg(all(feature = "hyper-rustls", feature = "allow-insecure-tls"))]
+mod insecure {
+
+    use std::sync::Arc;
+
+    pub(crate) fn client_config() -> rustls::ClientConfig {
+        tracing::warn!(
+            "\n\n{}\n",
+            [
+                "-- TLS CERTIFICATE VERIFICATION DISABlED --",
+                "YOU HAVE EXPLICITLY OPTED TO LIVE DANGEROUSLY",
+                "PLEASE PROCEED WITH APPROPRIATE CAUTION",
+                "(or don't; I'm a warning message, not a cop)",
+                "-- TLS CERTIFICATE VERIFICATION DISABlED --",
+            ]
+            .join("\n\n")
+        );
+
+        let mut config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+
+        // Disable certificate verification
+        config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(PermissiveCertificateVerifier));
+
+        config
+    }
+
+    #[derive(Copy, Clone, Debug, Default)]
+    struct PermissiveCertificateVerifier;
+
+    impl rustls::client::danger::ServerCertVerifier for PermissiveCertificateVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls_pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+            _server_name: &rustls_pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls_pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            // Accept all certificates without verification
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls_pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls_pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::ED448,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::RSA_PKCS1_SHA1,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                rustls::SignatureScheme::RSA_PSS_SHA512,
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::RSA_PKCS1_SHA384,
+                rustls::SignatureScheme::RSA_PKCS1_SHA512,
+                rustls::SignatureScheme::ECDSA_SHA1_Legacy,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            ]
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
